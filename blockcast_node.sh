@@ -190,7 +190,46 @@ check_curl() {
 
 # NODE FUNC
 
+get_compose_command() {
+    if command -v docker-compose &> /dev/null; then
+        echo "docker-compose"
+    elif docker compose version &> /dev/null 2>&1; then
+        echo "docker compose"
+    else
+        show_red "❌ Neither 'docker-compose' nor 'docker compose' command found"
+        return 1
+    fi
+}
+
 docker_installation() {
+    get_latest_docker_version() {
+        local version=$(curl -s https://docs.docker.com/engine/release-notes/ | \
+                      grep -oP 'Docker Engine \Kv?\d+\.\d+\.\d+' | head -1)
+
+        if [[ -z "$version" ]]; then
+            version=$(curl -s https://api.github.com/repos/moby/moby/releases/latest | \
+                     jq -r '.tag_name' | grep -oP 'v?\d+\.\d+\.\d+')
+        fi
+
+        if [[ -z "$version" ]] && command -v apt-get &>/dev/null; then
+            version=$(apt-cache madison docker-ce | awk '{print $3}' | sort -V | tail -1 | cut -d':' -f2)
+        fi
+
+        echo "${version:-24.0.0}" | sed 's/^v//'
+    }
+
+    get_latest_compose_version() {
+        local version=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | \
+                      jq -r '.tag_name')
+
+        if [[ -z "$version" || "$version" == "null" ]]; then
+            version=$(curl -s https://docs.docker.com/compose/release-notes/ | \
+                     grep -oP 'Compose \Kv?\d+\.\d+\.\d+' | head -1)
+        fi
+
+        echo "${version:-2.20.0}" | sed 's/^v//'
+    }
+
     local steps=(
         "🔎 Checking system dependencies"
         "🌐 Fetching latest versions"
@@ -212,6 +251,14 @@ docker_installation() {
     }
 
     step_progress
+    if ! command -v curl >/dev/null; then
+        show_orange "ℹ️ curl not found. Installing..."
+        run_commands "sudo apt-get update && sudo apt-get install -y curl" || {
+            show_red "❌ Failed to install curl";
+            exit 1;
+        }
+    fi
+
     if ! command -v jq >/dev/null; then
         show_orange "ℹ️ jq not found. Installing..."
         run_commands "sudo apt-get install -y jq" || {
@@ -221,15 +268,8 @@ docker_installation() {
     fi
 
     step_progress
-    LATEST_DOCKER=$(curl -s https://api.github.com/repos/docker/docker-ce/releases/latest | jq -r '.name' || echo "24.0.0")
-    if [[ "$LATEST_DOCKER" == "null" || -z "$LATEST_DOCKER" ]]; then
-        LATEST_DOCKER=$(curl -s https://docs.docker.com/engine/release-notes/ | grep -oP 'Docker Engine \Kv\d+\.\d+\.\d+' | head -1 || echo "24.0.0")
-    fi
-
-    LATEST_COMPOSE=$(curl -s https://api.github.com/repos/docker/compose/releases/latest | jq -r '.tag_name' || echo "v2.20.0")
-    if [[ "$LATEST_COMPOSE" == "null" ]]; then
-        LATEST_COMPOSE=$(curl -s https://docs.docker.com/compose/release-notes/ | grep -oP 'Compose \Kv\d+\.\d+\.\d+' | head -1 || echo "v2.20.0")
-    fi
+    LATEST_DOCKER=$(get_latest_docker_version)
+    LATEST_COMPOSE=$(get_latest_compose_version)
 
     show_green "• Latest Docker: $LATEST_DOCKER"
     show_green "• Latest Docker Compose: $LATEST_COMPOSE"
@@ -243,7 +283,7 @@ docker_installation() {
     NEED_DOCKER_UPDATE=true
     if command -v docker >/dev/null; then
         CURRENT_DOCKER=$(docker --version | grep -oP '[\d.]+' | head -1)
-        if [ "$(printf '%s\n' "$(echo $LATEST_DOCKER | grep -oP '[\d.]+')" "$CURRENT_DOCKER" | sort -V | head -n1)" = "$(echo $LATEST_DOCKER | grep -oP '[\d.]+')" ]; then
+        if [ "$(printf '%s\n' "$LATEST_DOCKER" "$CURRENT_DOCKER" | sort -V | head -n1)" = "$LATEST_DOCKER" ]; then
             NEED_DOCKER_UPDATE=false
             show_green "✓ Docker is up-to-date (v$CURRENT_DOCKER)"
         fi
@@ -273,7 +313,7 @@ EONG
     step_progress
     NEED_COMPOSE_UPDATE=true
     if docker compose version &>/dev/null; then
-        CURRENT_COMPOSE=$(docker compose version | grep -oP 'v[\d.]+')
+        CURRENT_COMPOSE=$(docker compose version | grep -oP '[\d.]+')
         if [ "$(printf '%s\n' "$LATEST_COMPOSE" "$CURRENT_COMPOSE" | sort -V | head -n1)" = "$LATEST_COMPOSE" ]; then
             NEED_COMPOSE_UPDATE=false
             show_green "✓ Docker Compose is up-to-date ($CURRENT_COMPOSE)"
@@ -388,7 +428,8 @@ install_node() {
     fi
 
     step_progress
-    if run_commands "docker-copmpose up -d"; then
+    DC=$(get_compose_command) || return 1
+    if run_commands "$DC up -d"; then
         show_green "✅ Containers started successfully"
     else
         return 1
@@ -524,7 +565,8 @@ delete_node() {
             return 1
         }
 
-        if run_commands "docker-compose down --rmi all --volumes --remove-orphans"; then
+        DC=$(get_compose_command) || return 1
+        if run_commands "$DC down --rmi all --volumes --remove-orphans"; then
             show_green "✓ All Docker resources removed"
         else
             show_red "⚠️  Partial cleanup - some components may remain"
